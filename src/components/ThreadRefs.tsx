@@ -1,3 +1,5 @@
+import { LINK_CLASS, usePageOpener, withPageOpen } from "./ChatLinks";
+import { LinkHoverCard } from "./LinkHoverCard";
 import { MentionText } from "./MentionText";
 import type { MentionPeer } from "@/lib/mentions";
 import { createContext, Fragment, useContext, useMemo, useRef, type ReactNode } from "react";
@@ -125,6 +127,19 @@ export function threadLinkFromProps(props: Record<string, unknown>): { target: T
   };
 }
 
+function WebLink({ href, children }: { href: string; children: ReactNode }) {
+  const openPage = usePageOpener({ beside: true });
+  return (
+    <LinkHoverCard href={href}>
+      {(anchor) => (
+        <a {...withPageOpen(href, openPage, anchor)} href={href} target="_blank" rel="noreferrer" dir="auto" className={LINK_CLASS}>
+          {children}
+        </a>
+      )}
+    </LinkHoverCard>
+  );
+}
+
 export function ThreadRefText({ text, peers, everyone = false }: {
   text: string; peers?: readonly MentionPeer[]; everyone?: boolean;
 }) {
@@ -132,12 +147,14 @@ export function ThreadRefText({ text, peers, everyone = false }: {
   const spans = useMemo(() => splitThreadRefsForDisplay(text, threads, currentBotId), [text, threads, currentBotId]);
   const plain = (run: string, key: number) =>
     peers ? <MentionText key={key} text={run} peers={peers} everyone={everyone} /> : <Fragment key={key}>{run}</Fragment>;
-  if (!spans.some((span) => span.ref)) return plain(text, 0);
+  if (!spans.some((span) => span.ref || span.href)) return plain(text, 0);
   return (
     <>
       {spans.map((span, index) => (span.ref
         ? <ThreadLink key={index} target={span.ref} ambiguous={span.ref.ambiguous}>{span.text}</ThreadLink>
-        : plain(span.text, index)))}
+        : span.href
+          ? <WebLink key={index} href={span.href}>{span.text}</WebLink>
+          : plain(span.text, index)))}
     </>
   );
 }

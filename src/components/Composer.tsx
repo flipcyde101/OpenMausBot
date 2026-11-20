@@ -86,6 +86,7 @@ import {
 } from "./ComposerQueuedMessages";
 import { skillAuthoringEnabled } from "@/lib/feature-flags";
 import { mentionChoicesForQuery, mentionQueryAt } from "@/lib/mentions"; import { mentionPicksFor, restoreMentionPicks } from "@/lib/mention-picks";
+import { linkSelection, typeOverSelection } from "@/lib/link-paste";
 import { serializeThreadRefs, threadTokenFromPaste, threadTokenSpacing } from "@/lib/thread-refs";
 import {
   composerSlashTrigger,
@@ -603,6 +604,10 @@ export function Composer({
     setChannelMode("chat");
   };
 
+  const placeCaret = (at: number) => {
+    setCaret(at);
+    requestAnimationFrame(() => { inputRef.current?.focus(); inputRef.current?.setSelectionRange(at, at); });
+  };
   const handlePaste = (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
     const pastedFiles = clipboardFilesToAttach(e.clipboardData);
     if (pastedFiles.length > 0) {
@@ -652,12 +657,13 @@ export function Composer({
       const { lead, trail } = threadTokenSpacing(text, start, end);
       const token = lead + reference.token + trail;
       editText(text.slice(0, start) + token + text.slice(end));
-      const at = start + token.length;
-      setCaret(at);
-      requestAnimationFrame(() => {
-        inputRef.current?.focus();
-        inputRef.current?.setSelectionRange(at, at);
-      });
+      placeCaret(start + token.length);
+      return;
+    }
+    const linked = linkSelection(text, e.currentTarget.selectionStart, e.currentTarget.selectionEnd, pasted);
+    if (linked) {
+      e.preventDefault();
+      if (!typeOverSelection(linked.insert)) { editText(linked.text); placeCaret(linked.caret); }
       return;
     }
     if (!isLongPaste(pasted)) return;
