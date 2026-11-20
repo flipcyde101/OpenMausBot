@@ -1,0 +1,134 @@
+name: Validate paste-link CI (public)
+
+on:
+  push:
+    branches:
+      - validate/6705-paste-link-public-ci
+
+permissions:
+  contents: read
+
+concurrency:
+  group: validate-6705-paste-link-public-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  static:
+    name: preflight
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@ff378ebe6b225b0680b81c1ad4498ae0d1d3a5e3 # v6.0.10
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Validate locale catalogs
+        run: pnpm i18n:check
+      - name: Check skin contrast
+        run: pnpm check:contrast
+      - name: Lint
+        run: pnpm lint
+
+  build:
+    needs: static
+    name: typecheck + build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@ff378ebe6b225b0680b81c1ad4498ae0d1d3a5e3 # v6.0.10
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Prepare Electron test runtime
+        run: node --input-type=commonjs -e "require('electron')"
+      - run: pnpm typecheck
+      - run: pnpm check:electron
+      - name: Production UI build
+        run: pnpm exec vite build
+
+  packaged-server:
+    needs: static
+    name: packaged server smoke (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-24.04
+          - windows-latest
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@ff378ebe6b225b0680b81c1ad4498ae0d1d3a5e3 # v6.0.10
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm test:packaged-server
+
+  vitest:
+    needs: static
+    name: vitest (${{ matrix.os }}, shard ${{ matrix.shard }}/${{ matrix.os == 'macos-latest' && 4 || 8 }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-24.04
+          - windows-latest
+          - macos-latest
+        shard: [1, 2, 3, 4, 5, 6, 7, 8]
+        exclude:
+          - os: macos-latest
+            shard: 5
+          - os: macos-latest
+            shard: 6
+          - os: macos-latest
+            shard: 7
+          - os: macos-latest
+            shard: 8
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: ${{ matrix.os == 'ubuntu-24.04' && 25 || 30 }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@ff378ebe6b225b0680b81c1ad4498ae0d1d3a5e3 # v6.0.10
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Prepare Electron test runtime
+        run: node --input-type=commonjs -e "require('electron')"
+      - name: Run tests
+        env:
+          OMB_VITEST_RETRY_LOG: ${{ runner.temp }}/vitest-retries.jsonl
+          OMB_VITEST_E2E: ${{ matrix.os == 'ubuntu-24.04' && 'all' || 'host' }}
+          OMB_VITEST_WORKERS: ${{ matrix.os == 'ubuntu-24.04' && '4' || matrix.os == 'windows-latest' && '2' || '1' }}
+        run: pnpm exec vitest run --shard=${{ matrix.shard }}/${{ matrix.os == 'macos-latest' && 4 || 8 }} --reporter=default --reporter=github-actions
+      - name: Report flaky tests that needed a retry
+        if: ${{ !cancelled() }}
+        env:
+          OMB_VITEST_RETRY_LOG: ${{ runner.temp }}/vitest-retries.jsonl
+        run: node scripts/testing/ci-retry-summary.mjs
+      - name: Broker and Electron unit tests
+        if: matrix.shard == 1
+        timeout-minutes: 5
+        run: pnpm broker:test && pnpm test:electron
+      - name: Packaged server smoke (macOS)
+        if: matrix.os == 'macos-latest' && matrix.shard == 1
+        timeout-minutes: 10
+        run: pnpm test:packaged-server
