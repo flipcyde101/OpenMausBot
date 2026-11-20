@@ -266,10 +266,12 @@ describe("canonical thread links", () => {
       "[see #Release notes](https://example.test/a (Official))",
       "[see #Release notes](<https://example.test/a b>)",
     ];
-    for (const form of forms) {
+    const destinations = ["https://example.test/a_(b)", "https://example.test/a_(b_(c))_(d)", "https://example.test/a", "https://example.test/a", null];
+    forms.forEach((form, index) => {
       expect(serializeThreadRefs(form, threads)).toBe(form);
-      expect(splitThreadRefsForDisplay(form, threads)).toEqual([{ text: form }]);
-    }
+      const href = destinations[index];
+      expect(splitThreadRefsForDisplay(form, threads)).toEqual([href ? { text: "see #Release notes", href } : { text: form }]);
+    });
   });
 
   it("treats an unterminated inline link as a plain run instead of hanging", () => {
@@ -285,6 +287,86 @@ describe("canonical thread links", () => {
       expect(serializeThreadRefs(form, threads)).toBe(form);
       expect(splitThreadRefsForDisplay(form, threads)).toEqual([{ text: form }]);
     }
+  });
+
+  it("protects tilde fences, variable-length backtick fences, mid-line fence ticks, and indented code", () => {
+    const codeSamples = [
+      "~~~\n[docs](https://example.com/)\n~~~",
+      "~~~\n#Release notes\n~~~",
+      "~~~~\n~~~\n[docs](https://example.com/)\n~~~~",
+      "````\n```\n[docs](https://example.com/)\n````",
+      "``````\n[docs](https://example.com/)\n``````",
+      "```js\nconst s = \"```\";\n[docs](https://example.com/)\n```",
+      "    [docs](https://example.com/)",
+      "\t[docs](https://example.com/)",
+      "    #Release notes",
+      "hello\n\n    [docs](https://example.com/)",
+    ];
+    for (const sample of codeSamples) {
+      expect(serializeThreadRefs(sample, threads)).toBe(sample);
+      const spans = splitThreadRefsForDisplay(sample, threads);
+      expect(spans.every((span) => !span.href && !span.ref)).toBe(true);
+      expect(spans.map((span) => span.text).join("")).toBe(sample);
+    }
+    expect(splitThreadRefsForDisplay("   [docs](https://example.com/)", threads)).toEqual([
+      { text: "   " },
+      { text: "docs", href: "https://example.com/" },
+    ]);
+    expect(splitThreadRefsForDisplay("hello\n    [docs](https://example.com/)", threads)).toEqual([
+      { text: "hello\n    " },
+      { text: "docs", href: "https://example.com/" },
+    ]);
+  });
+
+  it("preserves linked images and plain images without corrupting them into partial links", () => {
+    const samples = [
+      "![alt](https://example.com/p.png)",
+      "[![alt](https://example.com/a.png)](https://example.com/b)",
+      "[![alt](/a.png)](https://example.com/b)",
+      "[![#Release notes](https://example.com/a.png)](https://example.com/b)",
+      "![#Release notes](https://example.com/a.png)",
+    ];
+    for (const sample of samples) {
+      expect(serializeThreadRefs(sample, threads)).toBe(sample);
+      expect(splitThreadRefsForDisplay(sample, threads)).toEqual([{ text: sample }]);
+    }
+    expect(splitThreadRefsForDisplay("[![alt](https://example.com/a.png)](https://example.com/b) and [docs](https://example.com/c)", threads)).toEqual([
+      { text: "[![alt](https://example.com/a.png)](https://example.com/b)" },
+      { text: " and " },
+      { text: "docs", href: "https://example.com/c" },
+    ]);
+  });
+
+  it("parses links after unmatched or escaped syntax, with escaped titles, and with nested balanced brackets", () => {
+    expect(splitThreadRefsForDisplay("use ``` and [docs](https://example.com/)", threads)).toEqual([
+      { text: "use ``` and " },
+      { text: "docs", href: "https://example.com/" },
+    ]);
+    expect(splitThreadRefsForDisplay("a ` b [docs](https://example.com/)", threads)).toEqual([
+      { text: "a ` b " },
+      { text: "docs", href: "https://example.com/" },
+    ]);
+    expect(splitThreadRefsForDisplay("\\`not code [docs](https://example.com/)", threads)).toEqual([
+      { text: "\\`not code " },
+      { text: "docs", href: "https://example.com/" },
+    ]);
+    expect(splitThreadRefsForDisplay("\\[not link [docs](https://example.com/)", threads)).toEqual([
+      { text: "\\[not link " },
+      { text: "docs", href: "https://example.com/" },
+    ]);
+    expect(splitThreadRefsForDisplay("![not image [docs](https://example.com/)", threads)).toEqual([
+      { text: "![not image " },
+      { text: "docs", href: "https://example.com/" },
+    ]);
+    expect(splitThreadRefsForDisplay('[docs](https://example.com/ "a \\"b\\" c")', threads)).toEqual([
+      { text: "docs", href: "https://example.com/" },
+    ]);
+    expect(splitThreadRefsForDisplay("[docs](https://example.com/ (a \\) b))", threads)).toEqual([
+      { text: "docs", href: "https://example.com/" },
+    ]);
+    expect(splitThreadRefsForDisplay("[text [1]](https://example.com/)", threads)).toEqual([
+      { text: "text [1]", href: "https://example.com/" },
+    ]);
   });
 
 });

@@ -93,6 +93,117 @@ describe("ThreadRefText", () => {
   });
 });
 
+describe("ThreadRefText with a web link", () => {
+  const LINK = "https://example.com/a?x=1&y=2";
+  const render = (text: string, props: Record<string, unknown> = {}) => inProvider(createElement(ThreadRefText, { text, ...props }));
+  const decode = (markup: string) => markup.replaceAll("&quot;", '"').replaceAll("&gt;", ">").replaceAll("&lt;", "<").replaceAll("&amp;", "&");
+
+  it("draws a sent [label](address) as a link labeled with the words, and no brackets", () => {
+    const markup = render(`see [the docs](${LINK}) now`);
+    expect(markup).toMatch(/^see <a [^>]*href="https:\/\/example\.com\/a\?x=1&amp;y=2"[^>]*>the docs<\/a> now$/);
+    expect(markup).toContain('target="_blank"');
+    expect(markup).toContain('rel="noreferrer"');
+    expect(markup).not.toContain("[the docs]");
+  });
+
+  it("reads escaped brackets in the label as the words they stand for", () => {
+    expect(render(`[a\\[1\\]](${LINK})`)).toContain(">a[1]</a>");
+  });
+
+  it("keeps whitespace and line breaks around the link exactly", () => {
+    expect(render(`a  [x](${LINK})\n\n b`)).toMatch(/^a  <a [^>]*>x<\/a>\n\n b$/);
+  });
+
+  it.each([
+    ["a script address", "[x](javascript:alert(1))"],
+    ["a file address", "[x](file:///C:/secret.txt)"],
+    ["an address with a password", "[x](https://user:pw@example.com/)"],
+    ["an address that is not an address", "[x](https://)"],
+    ["a link with no words to click", "[ ](https://example.com/)"],
+    ["a link inside a code span", "`[x](https://example.com/)`"],
+    ["a link inside a code block", "```\n[x](https://example.com/)\n```"],
+  ])("leaves %s as the raw text it was sent as", (_name, text) => {
+    const markup = render(text);
+    expect(markup).not.toContain("<a ");
+    expect(decode(markup)).toBe(text);
+  });
+
+  it("leaves a plain or linked image as the raw text it was sent as, never a partial anchor", () => {
+    const image = "![alt](https://example.com/p.png)";
+    expect(render(image)).not.toContain("<a ");
+    expect(decode(render(image))).toBe(image);
+    const linkedImage = "[![alt](https://example.com/a.png)](https://example.com/b)";
+    expect(render(linkedImage)).not.toContain("<a ");
+    expect(decode(render(linkedImage))).toBe(linkedImage);
+    const relativeLinkedImage = "[![alt](/a.png)](https://example.com/b)";
+    expect(render(relativeLinkedImage)).not.toContain("<a ");
+    expect(decode(render(relativeLinkedImage))).toBe(relativeLinkedImage);
+    const mixed = render(`see ${image} and ${linkedImage} and [b](https://example.com/)`);
+    expect(mixed.match(/<a /g)).toHaveLength(1);
+    expect(decode(mixed)).toContain(image);
+    expect(decode(mixed)).toContain(linkedImage);
+    expect(mixed).toContain(">b</a>");
+  });
+
+  it("leaves links inside tilde fences, longer backtick fences, mid-line fence ticks, and indented code as raw text", () => {
+    for (const block of [
+      "~~~\n[docs](https://example.com/)\n~~~",
+      "~~~~\n~~~\n[docs](https://example.com/)\n~~~~",
+      "````\n```\n[docs](https://example.com/)\n````",
+      "``````\n[docs](https://example.com/)\n``````",
+      "```js\nconst s = \"```\";\n[docs](https://example.com/)\n```",
+      "    [docs](https://example.com/)",
+      "\t[docs](https://example.com/)",
+    ]) {
+      const markup = render(block);
+      expect(markup).not.toContain("<a ");
+      expect(decode(markup)).toBe(block);
+    }
+  });
+
+  it("still links after unmatched or escaped backticks, escaped brackets, and in links with escaped titles or nested brackets", () => {
+    expect(render("use ``` and [docs](https://example.com/)")).toMatch(/^use ``` and <a [^>]*href="https:\/\/example\.com\/"[^>]*>docs<\/a>$/);
+    expect(render("a ` b [docs](https://example.com/)")).toMatch(/^a ` b <a [^>]*href="https:\/\/example\.com\/"[^>]*>docs<\/a>$/);
+    expect(render("\\`not code [docs](https://example.com/)")).toMatch(/^\\`not code <a [^>]*href="https:\/\/example\.com\/"[^>]*>docs<\/a>$/);
+    expect(render("\\[not link [docs](https://example.com/)")).toMatch(/^\\\[not link <a [^>]*href="https:\/\/example\.com\/"[^>]*>docs<\/a>$/);
+    expect(render("![not image [docs](https://example.com/)")).toMatch(/^!\[not image <a [^>]*href="https:\/\/example\.com\/"[^>]*>docs<\/a>$/);
+    expect(render('[docs](https://example.com/ "a \\"b\\" c")')).toMatch(/^<a [^>]*href="https:\/\/example\.com\/"[^>]*>docs<\/a>$/);
+    expect(render("[docs](https://example.com/ (a \\) b))")).toMatch(/^<a [^>]*href="https:\/\/example\.com\/"[^>]*>docs<\/a>$/);
+    expect(render("[text [1]](https://example.com/)")).toMatch(/^<a [^>]*href="https:\/\/example\.com\/"[^>]*>text \[1\]<\/a>$/);
+  });
+
+  it("leaves a link whose bracket was escaped as the raw text it was sent as", () => {
+    const escaped = "\\[docs](https://example.com/)";
+    expect(render(escaped)).not.toContain("<a ");
+    expect(decode(render(escaped))).toBe(escaped);
+    const escapedThread = "\\[QA PR 245](openmausbot://thread/qa-245?bot=scout)";
+    expect(render(escapedThread)).not.toContain("data-thread-link=");
+    expect(decode(render(escapedThread))).toBe(escapedThread);
+  });
+
+  it("still links after an escaped backslash or an escaped bang, which are plain characters", () => {
+    expect(render("\\\\[docs](https://example.com/)")).toMatch(/^\\\\<a [^>]*>docs<\/a>$/);
+    expect(render("\\![docs](https://example.com/)")).toMatch(/^\\!<a [^>]*>docs<\/a>$/);
+    expect(render("\\\\[QA PR 245](openmausbot://thread/qa-245?bot=scout)")).toContain('data-thread-link="qa-245"');
+  });
+
+  it("does not link a bare address, which stays the text it was sent as", () => {
+    expect(render("see https://example.com/ now")).toBe("see https://example.com/ now");
+  });
+
+  it("still draws a thread link beside a web link", () => {
+    const markup = render(`[QA PR 245](openmausbot://thread/qa-245?bot=scout) and [docs](${LINK})`);
+    expect(markup).toContain('data-thread-link="qa-245"');
+    expect(markup).toMatch(/>docs<\/a>$/);
+  });
+
+  it("still marks a mention in the words around the link", () => {
+    const markup = render(`@Ada read [docs](${LINK}) @Ada`, { peers: [{ name: "Ada" }] });
+    expect(markup.match(/mention-highlight/g)).toHaveLength(2);
+    expect(markup).toContain(">docs</a>");
+  });
+});
+
 describe("ThreadLink", () => {
   it("clicking opens that thread through openThread", () => {
     let tree: ReactNode;

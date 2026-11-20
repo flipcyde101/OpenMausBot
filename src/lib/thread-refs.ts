@@ -1,3 +1,5 @@
+import { fromMarkdown } from "mdast-util-from-markdown";
+
 export interface ThreadRefCandidate {
   botId: string;
   botName: string;
@@ -228,9 +230,22 @@ export function resolveThreadRefAddress(
   return pick(candidates, currentBotId);
 }
 
-const escapeThreadLabel = (title: string): string =>
+export const escapeThreadLabel = (title: string): string =>
   title.replace(/[[\]\\]/g, "\\$&");
 const unescapeThreadLabel = (label: string): string => label.replace(/\\(.)/g, "$1");
+const unescapeLinkLabel = (label: string): string => label.replace(/\\([!-/:-@[-`{-~])/g, "$1");
+
+/** The address of an HTTP(S) link, as written, or null. Never a script or file address, one with a password, or one
+ * that would end its own destination early. */
+export function httpLinkDestination(value: string): string | null {
+  if (!/^https?:\/\/(?![/?#])\S+$/i.test(value) || /[<>\\\p{Cc}]/u.test(value)) return null;
+  try {
+    const url = new URL(value);
+    return url.username || url.password || !url.hostname ? null : value;
+  } catch {
+    return null;
+  }
+}
 
 export function threadRefMarkdown(ref: ResolvedThreadRef): string {
   return "[" + escapeThreadLabel(ref.title) + "](" + threadRefUrl(ref) + ")";
@@ -238,101 +253,84 @@ export function threadRefMarkdown(ref: ResolvedThreadRef): string {
 
 interface MarkdownLinkSpan {
   raw: string;
-  link?: { label: string; address: ThreadRefAddress | null };
+  link?: { label: string; address: ThreadRefAddress | null; destination: string };
   code?: boolean;
 }
 
-const MARKDOWN_LINK_LABEL = /\[((?:\\.|[^\\\]])*)\]\(/y;
-const INLINE_LINK_SPACE = " \t\n\r";
+interface ParsedMdNode {
+  type: string;
+  url?: string;
+  children?: ParsedMdNode[];
+  position?: { start: { offset?: number }; end: { offset?: number } };
+}
 
-/** The CommonMark inline-link tail after "[label](", or null when no complete link closes here. */
-function inlineLinkTail(rest: string, from: number): { tail: number; destination: string } | null {
-  let at = from;
-  while (at < rest.length && INLINE_LINK_SPACE.includes(rest.charAt(at))) at += 1;
-  const destStart = at;
-  let destination = "";
-  if (rest.charAt(at) === "<") {
-    const close = rest.indexOf(">", at + 1);
-    if (close === -1) return null;
-    destination = rest.slice(at + 1, close);
-    at = close + 1;
-  } else {
-    let depth = 0;
-    while (at < rest.length) {
-      const ch = rest.charAt(at);
-      if (ch === "(") depth += 1;
-      else if (ch === ")") {
-        if (depth === 0) break;
-        depth -= 1;
-      } else if (INLINE_LINK_SPACE.includes(ch)) break;
-      at += 1;
-    }
-    if (depth !== 0) return null;
-    destination = rest.slice(destStart, at);
-  }
-  while (at < rest.length && INLINE_LINK_SPACE.includes(rest.charAt(at))) at += 1;
-  const titleQuote = rest.charAt(at);
-  if (titleQuote === '"' || titleQuote === "'") {
-    const close = rest.indexOf(titleQuote, at + 1);
-    if (close === -1) return null;
-    at = close + 1;
-  } else if (titleQuote === "(") {
-    let depth = 1;
-    at += 1;
-    while (at < rest.length && depth > 0) {
-      const ch = rest.charAt(at);
-      if (ch === "(") depth += 1;
-      else if (ch === ")") depth -= 1;
-      at += 1;
-    }
-    if (depth !== 0) return null;
-  }
-  while (at < rest.length && INLINE_LINK_SPACE.includes(rest.charAt(at))) at += 1;
-  if (rest.charAt(at) !== ")") return null;
-  return { tail: at + 1 - from, destination };
+const oddBackslashesEnd = (text: string): boolean => (/\\*$/.exec(text)?.[0].length ?? 0) % 2 === 1;
+
+/** True for a `[` that opens an image (`![`) or was escaped (`\[`), so what follows is not a link. */
+export function bracketIsLiteral(text: string, at: number): boolean {
+  const before = text.slice(0, at);
+  return oddBackslashesEnd(before) || (before.endsWith("!") && !oddBackslashesEnd(before.slice(0, -1)));
+}
+
+const MAY_HAVE_MARKDOWN_LINK_OR_CODE = /\]\(|`|~| {4}|\t/;
+
+function hasImageNode(node: ParsedMdNode): boolean {
+  if (node.type === "image" || node.type === "imageReference") return true;
+  return Boolean(node.children?.some(hasImageNode));
+}
+
+function inlineLinkLabelEnd(text: string, start: number, end: number, node: ParsedMdNode): number {
+  const after = node.children?.at(-1)?.position?.end.offset ?? start + 1;
+  const close = text.indexOf("](", after);
+  return close !== -1 && close < end ? close : -1;
 }
 
 function splitThreadLinkMarkdown(text: string): MarkdownLinkSpan[] {
-  if (!text.includes("](") && !text.includes("`")) return [{ raw: text }];
+  if (!MAY_HAVE_MARKDOWN_LINK_OR_CODE.test(text)) return [{ raw: text }];
   const spans: MarkdownLinkSpan[] = [];
-  let plain = "";
-  const flush = () => {
-    if (plain) spans.push({ raw: plain });
-    plain = "";
+  let cursor = 0;
+  const pushPlain = (to: number) => {
+    if (to > cursor) spans.push({ raw: text.slice(cursor, to) });
+    cursor = to;
   };
-  let at = 0;
-  while (at < text.length) {
-    const rest = text.slice(at);
-    const guarded = (end: number) => {
-      flush();
-      spans.push({ raw: text.slice(at, end), code: true });
-      at = end;
-    };
-    if (rest.startsWith("```")) {
-      const close = rest.indexOf("```", 3);
-      guarded(close === -1 ? text.length : at + close + 3);
-      continue;
+  const visit = (node: ParsedMdNode) => {
+    const start = node.position?.start.offset;
+    const end = node.position?.end.offset;
+    if (node.type === "code" || node.type === "inlineCode" || node.type === "image") {
+      if (start !== undefined && end !== undefined && start >= cursor) {
+        pushPlain(start);
+        spans.push({ raw: text.slice(start, end), code: true });
+        cursor = end;
+      }
+      return;
     }
-    const ticks = /^`+/.exec(rest)?.[0];
-    if (ticks) {
-      const close = rest.indexOf(ticks, ticks.length);
-      guarded(close === -1 ? text.length : at + close + ticks.length);
-      continue;
+    if (node.type === "link") {
+      if (start !== undefined && end !== undefined && start >= cursor) {
+        pushPlain(start);
+        const raw = text.slice(start, end);
+        if (text[start] === "[" && !hasImageNode(node)) {
+          const labelEnd = inlineLinkLabelEnd(text, start, end, node);
+          if (labelEnd !== -1) {
+            const destination = node.url ?? "";
+            spans.push({
+              raw,
+              link: { label: text.slice(start + 1, labelEnd), address: parseThreadRefUrl(destination), destination },
+            });
+            cursor = end;
+            return;
+          }
+        }
+        spans.push({ raw, code: true });
+        cursor = end;
+      }
+      return;
     }
-    MARKDOWN_LINK_LABEL.lastIndex = 0;
-    const open = MARKDOWN_LINK_LABEL.exec(rest);
-    const tail = open && inlineLinkTail(rest, open[0].length);
-    if (open && tail) {
-      flush();
-      const raw = rest.slice(0, open[0].length + tail.tail);
-      spans.push({ raw, link: { label: open[1], address: parseThreadRefUrl(tail.destination) } });
-      at += raw.length;
-      continue;
+    if (node.children) {
+      for (const child of node.children) visit(child);
     }
-    plain += text[at];
-    at += 1;
-  }
-  flush();
+  };
+  visit(fromMarkdown(text) as ParsedMdNode);
+  pushPlain(text.length);
   return spans.length ? spans : [{ raw: text }];
 }
 
@@ -349,6 +347,7 @@ export function serializeThreadRefs(text: string, threads: ThreadRefCandidate[],
 export interface ThreadRefDisplaySpan {
   text: string;
   ref?: ResolvedThreadRef;
+  href?: string;
 }
 
 export function splitThreadRefsForDisplay(text: string, threads: ThreadRefCandidate[], currentBotId?: string): ThreadRefDisplaySpan[] {
@@ -356,7 +355,9 @@ export function splitThreadRefsForDisplay(text: string, threads: ThreadRefCandid
   for (const span of splitThreadLinkMarkdown(text)) {
     if (span.link) {
       const ref = span.link.address ? resolveThreadRefAddress(threads, span.link.address, currentBotId) : null;
-      spans.push(ref ? { text: unescapeThreadLabel(span.link.label), ref } : { text: span.raw });
+      const href = ref || !span.link.label.trim() ? null : httpLinkDestination(span.link.destination);
+      spans.push(ref ? { text: unescapeThreadLabel(span.link.label), ref }
+        : href ? { text: unescapeLinkLabel(span.link.label), href } : { text: span.raw });
     } else if (span.code) {
       spans.push({ text: span.raw });
     } else {
